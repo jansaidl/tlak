@@ -1,0 +1,50 @@
+# zeropsPreprocessor=on
+#
+# Tlak — Production shape.
+#
+# Production hardening over the development shape:
+#   - Postgres: `postgresql:ha@17` (3-node cluster) on `oltp-production` profile
+#   - App: minimum 2 containers (rolling deploys, zero downtime), autoscaling up
+#   - Serious core package for the project (dedicated core, not shared)
+#   - Automatic subdomain still enabled — attach your custom domain and update
+#     WEBAUTHN_RP_ID + WEBAUTHN_ORIGIN accordingly BEFORE onboarding real users
+#     (passkeys are bound to WEBAUTHN_RP_ID and cannot be transferred).
+project:
+  name: tlak-production
+  corePackage: SERIOUS
+
+  envVariables:
+    AUTH_SECRET: <@generateRandomString(<64>)>
+    CRON_SECRET: <@generateRandomString(<48>)>
+
+services:
+  # HA PostgreSQL 17 — 3-node cluster for automatic failover.
+  # `oltp-production` profile bumps IOPS / RAM budgets to production levels.
+  - hostname: db
+    type: postgresql:ha@17
+    profile: oltp-production
+    priority: 10
+
+  # Next.js runtime. Minimum 2 containers so rolling deploys have a live target.
+  # Vertical autoscaling reacts to spikes without you having to guess sizes upfront.
+  - hostname: tlak
+    type: nodejs@22
+    buildFromGit: https://github.com/jansaidl/tlak
+    enableSubdomainAccess: true
+    minContainers: 2
+    maxContainers: 6
+    verticalAutoscaling:
+      minRam: 1
+      maxRam: 6
+      minFreeRamGB: 0.5
+    envSecrets:
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_TRUST_HOST: "true"
+      WEBAUTHN_RP_NAME: Tlak
+      # WEBAUTHN_RP_ID: your-domain.example.com   # set to your custom domain BEFORE onboarding users
+      # WEBAUTHN_ORIGIN: https://your-domain.example.com
+      # AUTH_URL: https://your-domain.example.com
+      # VAPID_PUBLIC_KEY: ...
+      # VAPID_PRIVATE_KEY: ...
+      # VAPID_SUBJECT: mailto:you@example.com
+      CRON_SECRET: ${CRON_SECRET}

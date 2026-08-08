@@ -1,0 +1,52 @@
+# zeropsPreprocessor=on
+#
+# Tlak — Development / self-hosted personal shape.
+#
+# Cheapest reasonable defaults:
+#   - Single-node Postgres on the `oltp-hobby` profile (fits ~1 GB DB, low IOPS)
+#   - One app container, RAM autoscaling between 1–4 GB
+#   - Subdomain access enabled on `tlak` for immediate HTTPS URL
+#
+# Downgrade / upgrade path: switch to `recipe/production/import.yaml` shape
+# once the app hosts more than a couple of users.
+project:
+  name: tlak-development
+
+  # Preprocessor secrets — generated once at import, exposed as project-level
+  # env vars that individual services reference by name.
+  envVariables:
+    AUTH_SECRET: <@generateRandomString(<64>)>
+    CRON_SECRET: <@generateRandomString(<48>)>
+
+services:
+  # PostgreSQL 17, single-node. `priority: 10` ensures the database is up
+  # before `tlak` runs its first migration.
+  - hostname: db
+    type: postgresql:single@17
+    profile: oltp-hobby
+    priority: 10
+
+  # Next.js runtime. Zerops clones source from `buildFromGit` and runs the
+  # `prod` setup from that repo's zerops.yaml.
+  - hostname: tlak
+    type: nodejs@22
+    buildFromGit: https://github.com/jansaidl/tlak
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    verticalAutoscaling:
+      minRam: 1
+      maxRam: 4
+      minFreeRamGB: 0.5
+    envSecrets:
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_TRUST_HOST: "true"
+      WEBAUTHN_RP_NAME: Tlak
+      # Set to the domain you enable after import. Passkeys bind to this — pick your
+      # final domain before onboarding users, or expect to re-register passkeys.
+      # WEBAUTHN_RP_ID: your-domain.example.com
+      # WEBAUTHN_ORIGIN: https://your-domain.example.com
+      # VAPID_PUBLIC_KEY: ...  # `npx web-push generate-vapid-keys`
+      # VAPID_PRIVATE_KEY: ...
+      # VAPID_SUBJECT: mailto:you@example.com
+      CRON_SECRET: ${CRON_SECRET}

@@ -1,0 +1,149 @@
+# Tlak — Next.js 15 + Drizzle + PostgreSQL + Passkey auth
+#
+# Two setups:
+#   - prod: production build. Runs a Next.js standalone bundle
+#           (`next build` → `.next/standalone/server.js`). Migrations applied once
+#           per app version via `zsc execOnce`. Small memory footprint at runtime.
+#   - dev:  developer build. Source deployed as-is (with node_modules), container
+#           idles on `zsc noop --silent` waiting for `next dev` started by the
+#           agent workflow (`zerops_dev_server`). Useful for interactive iteration.
+zerops:
+  - setup: prod
+    build:
+      base: nodejs@22
+
+      buildCommands:
+        # Deterministic install from the lockfile — the container's node_modules
+        # cache (see `cache:` below) is reused across builds when the lockfile is
+        # unchanged, cutting cold-build time by ~40s.
+        - npm ci
+
+        # esbuild-bundle the migrator (Drizzle + postgres-js + generated SQL)
+        # into a single self-contained migrate.cjs so runtime containers don't
+        # need node_modules to run migrations.
+        - node scripts/bundle-migrate.mjs
+
+        # Standalone Next.js build (`output: 'standalone'` in next.config.ts).
+        # Emits .next/standalone/server.js with @vercel/nft-traced deps inlined.
+        - npm run build
+
+      # Self-deploy shape (source and target service are the same container).
+      # Zerops requires `.` here — narrower globs would destroy the working
+      # tree during artifact extraction. On the runtime side we only USE:
+      #   - .next/standalone/  (traced server + deps)
+      #   - .next/static/       (copied into standalone at init time)
+      #   - public/             (copied into standalone at init time)
+      #   - drizzle/            (generated SQL migrations)
+      #   - migrate.cjs         (bundled migrator)
+      deployFiles: .
+
+      # node_modules survives cache invalidation windows via Zerops's shared
+      # build cache. Do NOT add `.next/cache` — Zerops cache restoration causes
+      # EACCES on subsequent builds (upstream Next.js issue with immutable
+      # cache dirs).
+      cache:
+        - node_modules
+
+      envVariables:
+        # Next.js webpack build peaks at ~1.4 GB heap on this app. Cap to keep
+        # small runtime containers from OOM-killing the build worker.
+        NODE_OPTIONS: --max-old-space-size=1536
+
+    deploy:
+      # Zerops holds traffic on the new container until GET / returns 2xx.
+      # Root path always renders (landing OR redirects to /dashboard), so it's
+      # a reliable readiness probe.
+      readinessCheck:
+        httpGet:
+          port: 3000
+          path: /
+
+    run:
+      base: nodejs@22
+
+      # Init commands run once per container start, BEFORE `start`.
+      # `zsc execOnce ${appVersionId}` guarantees the guarded command runs
+      # exactly once per deployed version across ALL replicas — important as
+      # soon as `minContainers > 1`.
+      initCommands:
+        # Apply pending Drizzle migrations. Bundled with esbuild, so no
+        # node_modules needed at runtime.
+        - zsc execOnce ${appVersionId} -- node migrate.cjs
+
+        # Next.js standalone server expects static assets + public dir NEXT
+        # TO server.js (not at project root). @vercel/nft doesn't copy these.
+        # Runs on every container start — cheap, deterministic.
+        - mkdir -p .next/standalone/.next
+        - cp -rT .next/static .next/standalone/.next/static
+        - cp -rT public .next/standalone/public
+
+      ports:
+        - port: 3000
+          httpSupport: true
+
+      envVariables:
+        NODE_ENV: production
+        PORT: 3000
+
+        # PostgreSQL wiring — `${db_*}` references resolve to the values
+        # published by the `db` service (see import.yaml). DB_NAME is a
+        # user-defined name; the rest are platform-injected.
+        DB_NAME: db
+        DB_HOST: ${db_hostname}
+        DB_PORT: ${db_port}
+        DB_USER: ${db_user}
+        DB_PASS: ${db_password}
+
+      # Next.js standalone reads HOSTNAME to decide what interface to bind
+      # (defaults to localhost, which the L7 balancer cannot reach). HOSTNAME
+      # is a Zerops-reserved env var name so we CANNOT set it via
+      # `envVariables` above — inline `env HOSTNAME=0.0.0.0 …` is the workaround.
+      start: env HOSTNAME=0.0.0.0 node .next/standalone/server.js
+
+  # Developer / debug setup. Container ships with full source + node_modules,
+  # idle by default so the agent can run `npm run dev` on demand.
+  - setup: dev
+    build:
+      base: nodejs@22
+      # Ubuntu base gives us bash, git, curl, editors, etc. for interactive SSH.
+      os: ubuntu
+
+      buildCommands:
+        # `install` instead of `ci` — dev may have an out-of-sync lockfile
+        # during active development. Trade determinism for flexibility.
+        - npm install
+
+      # Deploy the whole working tree so the developer has source + config +
+      # node_modules ready when they SSH in.
+      deployFiles: ./
+
+      cache:
+        - node_modules
+
+      envVariables:
+        NODE_OPTIONS: --max-old-space-size=1536
+
+    run:
+      base: nodejs@22
+      os: ubuntu
+
+      initCommands:
+        # Migrate using tsx directly against the TS source (no bundling).
+        - zsc execOnce ${appVersionId} -- npx tsx src/db/migrate.ts
+
+      ports:
+        - port: 3000
+          httpSupport: true
+
+      envVariables:
+        NODE_ENV: development
+        PORT: 3000
+        DB_NAME: db
+        DB_HOST: ${db_hostname}
+        DB_PORT: ${db_port}
+        DB_USER: ${db_user}
+        DB_PASS: ${db_password}
+
+      # Idle placeholder — the developer runs `npm run dev` via the
+      # `zerops_dev_server` MCP tool (or an SSH session).
+      start: zsc noop --silent

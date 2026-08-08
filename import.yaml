@@ -1,0 +1,59 @@
+# zeropsPreprocessor=on
+#
+# One-click import for Tlak (default: development shape).
+# Paste into Zerops dashboard: "Import project".
+#
+# Provisioned services:
+#   - tlak  — Node.js 22 runtime; Zerops clones this repo (buildFromGit) and runs `zerops.yaml`
+#   - db    — PostgreSQL 17 (single-node, hobby tier — cheap; upgrade to :ha for prod)
+#
+# Post-import: enable a subdomain on `tlak`, then set AUTH_URL, WEBAUTHN_RP_ID,
+# WEBAUTHN_ORIGIN and the three VAPID_* variables to your final domain and keys.
+# See README.md → "Post-import checklist".
+project:
+  name: tlak
+
+  # Zerops preprocessor macros — generated once at import.
+  # Referenced by services below via ${AUTH_SECRET}.
+  envVariables:
+    AUTH_SECRET: <@generateRandomString(<64>)>
+    CRON_SECRET: <@generateRandomString(<48>)>
+
+services:
+  # PostgreSQL data store. `priority: 10` boots it before dependent runtimes,
+  # eliminating a first-boot race on the migrator.
+  - hostname: db
+    type: postgresql:single@17
+    profile: oltp-hobby
+    priority: 10
+
+  # Application runtime. Zerops pulls source from `buildFromGit`, runs the
+  # build/deploy pipeline defined in that repo's `zerops.yaml`.
+  - hostname: tlak
+    type: nodejs@22
+    buildFromGit: https://github.com/jansaidl/tlak
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    verticalAutoscaling:
+      minRam: 1
+      maxRam: 4
+      minFreeRamGB: 0.5
+    envSecrets:
+      # Auth.js — JWT signing + trust the Host header (behind Zerops's L7 balancer).
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_TRUST_HOST: "true"
+
+      # WebAuthn — MUST match the domain browsers see. Update after enabling a subdomain.
+      # Passkeys are bound to WEBAUTHN_RP_ID; changing it invalidates existing passkeys.
+      WEBAUTHN_RP_NAME: Tlak
+      # WEBAUTHN_RP_ID: your-domain.example.com
+      # WEBAUTHN_ORIGIN: https://your-domain.example.com
+
+      # Web-push (VAPID). Generate: npx web-push generate-vapid-keys
+      # VAPID_PUBLIC_KEY: ...
+      # VAPID_PRIVATE_KEY: ...
+      # VAPID_SUBJECT: mailto:you@example.com
+
+      # Reminder cron auth. Call: GET /api/cron/reminders?token=${CRON_SECRET}
+      CRON_SECRET: ${CRON_SECRET}
