@@ -159,6 +159,6 @@ npm run dev
 
 ## License
 
-MIT © 2026 Jan Šaidl — see [LICENSE](./LICENSE).
+MIT — see [LICENSE](./LICENSE).
 
 Contributions welcome. Open an issue or a PR.
